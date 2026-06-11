@@ -647,12 +647,22 @@ function readFile(file) {
       } else {
         var wb = XLSX.read(ev.target.result, {type:'binary'});
         var sheetName = wb.SheetNames[0];
-        // prefer sheets with promoter data
+        // Prefer MAY_Final (GT format) or sheet with GT region headers
+        var preferred = ['MAY_Final','MAY  sale  ','MAY sale'];
+        for(var p=0;p<preferred.length;p++){
+          if(wb.SheetNames.indexOf(preferred[p])>=0){ sheetName=preferred[p]; break; }
+        }
+        // Also check for GT region headers in first sheet
         for(var i=0;i<wb.SheetNames.length;i++){
           var sn=wb.SheetNames[i];
           var tmp=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''});
-          var flat=tmp.slice(0,5).reduce(function(a,b){return a.concat(b);},[]).map(function(c){return String(c).toLowerCase();});
-          if(flat.some(function(c){return c.indexOf('promoter')>=0||c.indexOf('canola')>=0;})){sheetName=sn;break;}
+          var flat=tmp.slice(0,3).reduce(function(a,b){return a.concat(b);},[]).map(function(c){return String(c).toLowerCase();});
+          if(flat.some(function(c){return c.indexOf('gujarat')>=0||c.indexOf('haryana')>=0||c.indexOf('punjab')>=0;})){
+            sheetName=sn; break;
+          }
+          if(flat.some(function(c){return c.indexOf('promoter')>=0||c.indexOf('canola')>=0;})){
+            sheetName=sn;
+          }
         }
         rows = sheetToRows(wb.Sheets[sheetName]);
       }
@@ -673,6 +683,105 @@ function readFile(file) {
 function sheetToRows(ws) {
   var json = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
   if(!json.length) return [];
+
+  // Detect GT format — region name in col0 first few rows
+  var isGT = false;
+  for(var i=0;i<Math.min(5,json.length);i++){
+    var f = String(json[i][0]||'').toLowerCase();
+    if(f.indexOf('gujarat')>=0||f.indexOf('haryana')>=0||f.indexOf('punjab')>=0||
+       f.indexOf('delhi')>=0||f.indexOf('sale report')>=0){
+      isGT=true; break;
+    }
+  }
+  if(isGT) return parseGTSheet(json);
+  return parseStandardSheet(json);
+}
+
+// GT format: REGION ROW → HEADER ROW → DATA ROWS → TOTAL → blank → repeat
+function parseGTSheet(json) {
+  var rows = [];
+  var currentRegion = '';
+  var headers = null;
+  var colMap = {};
+  var REGIONS = ['gujarat','haryana','punjab','delhi','mumbai','kolkata','hyderabad','bangalore','chennai','pune','up','mp'];
+
+  for(var i=0;i<json.length;i++){
+    var raw = json[i];
+    var first = String(raw[0]||'').trim();
+    var firstLow = first.toLowerCase();
+    var nonEmpty = raw.filter(function(c){ return c!==''&&c!==null&&c!==undefined&&String(c).trim()!==''&&String(c)!=='nan'; });
+
+    // Skip blank
+    if(nonEmpty.length===0) continue;
+
+    // Region header — col0 has region/city name, mostly empty row
+    if(nonEmpty.length<=2) {
+      var isRegion = REGIONS.some(function(r){ return firstLow.indexOf(r)>=0; }) ||
+                     firstLow.indexOf('report')>=0 || firstLow.indexOf('sale')>=0;
+      if(isRegion && first.length > 1) {
+        currentRegion = first.replace(/sale\s*report/gi,'').replace(/report/gi,'').trim().toUpperCase();
+        headers = null; colMap = {};
+        continue;
+      }
+    }
+
+    // Header row — has 'promoter' or 'canola'
+    var rowLow = raw.map(function(c){return String(c||'').toLowerCase();});
+    var isHeader = rowLow.some(function(c){return c.indexOf('promoter')>=0||c.indexOf('canola')>=0;});
+    if(isHeader) {
+      headers = raw.map(function(c){return String(c||'').trim();});
+      colMap = {};
+      headers.forEach(function(h,idx){
+        var hl = h.toLowerCase().trim();
+        if(hl.indexOf('promoter')>=0||hl==='name') colMap.promoter=idx;
+        else if(hl.indexOf('store')>=0||hl.indexOf('outlet')>=0) colMap.store=idx;
+        else if(hl.indexOf('zone')>=0) colMap.zone=idx;
+        else if(hl.indexOf('emp')>=0||hl.indexOf('jwpl')>=0||hl.indexOf('empl')>=0) colMap.emp_code=idx;
+        else if(hl.indexOf('dsr')>=0) colMap.dsr_id=idx;
+        else if(hl==='canola target'||hl==='c.target'||hl==='c target') colMap.c_target=idx;
+        else if(hl==='canola'||hl==='canola '||hl==='c.sale'||hl==='c sale') colMap.c_sale=idx;
+        else if(hl==='olive target'||hl==='o.target'||hl==='o target') colMap.o_target=idx;
+        else if(hl==='olive'||hl==='olive '||hl==='o.sale'||hl==='o sale') colMap.o_sale=idx;
+        else if(hl.indexOf('so name')>=0||hl==='so'||hl==='soname') colMap.so_name=idx;
+      });
+      continue;
+    }
+
+    // Skip total rows
+    if(firstLow.indexOf('total')===0||firstLow==='s.no'||firstLow==='sno') continue;
+
+    if(!headers||!currentRegion) continue;
+
+    var gv = function(key){
+      if(colMap[key]===undefined) return '';
+      var v = raw[colMap[key]];
+      return (v===null||v===undefined||String(v)==='nan') ? '' : v;
+    };
+    var numv = function(v){ var n=parseFloat(String(v||0).replace(/[^\d.-]/g,'')); return isNaN(n)?0:n; };
+
+    var promoter = String(gv('promoter')||'').trim();
+    if(!promoter||promoter===''||/^\d+$/.test(promoter)) continue;
+    if(promoter.toLowerCase().indexOf('total')===0) continue;
+
+    rows.push({
+      region: currentRegion,
+      promoter: promoter,
+      store:    String(gv('store')||'').trim(),
+      zone:     String(gv('zone')||'').trim(),
+      emp_code: String(gv('emp_code')||'').trim(),
+      dsr_id:   String(gv('dsr_id')||'').trim(),
+      c_target: numv(gv('c_target')),
+      c_sale:   numv(gv('c_sale')),
+      o_target: numv(gv('o_target')),
+      o_sale:   numv(gv('o_sale')),
+      so_name:  String(gv('so_name')||'').trim(),
+    });
+  }
+  return rows;
+}
+
+// Standard format — single header row at top
+function parseStandardSheet(json) {
   var hdrIdx = 0;
   for(var i=0;i<Math.min(10,json.length);i++){
     var row=json[i].map(function(c){return String(c).toLowerCase();});
@@ -680,6 +789,7 @@ function sheetToRows(ws) {
   }
   var headers = json[hdrIdx].map(function(c){return String(c).trim();});
   var rows=[], lastRegion='';
+  var numv=function(v){var n=parseFloat(String(v||0).replace(/[^\d.-]/g,''));return isNaN(n)?0:n;};
   for(var i=hdrIdx+1;i<json.length;i++){
     var raw=json[i];
     if(raw.every(function(c){return c===''||c===null||c===undefined;})) continue;
@@ -694,18 +804,17 @@ function sheetToRows(ws) {
     if(!region) continue;
     lastRegion=region;
     var promoter=String(get(['promoter name','promoter','name','promoters name'])).trim();
-    if(!promoter||promoter.toLowerCase()==='total'||promoter.toLowerCase()==='s.no') continue;
-    var num=function(v){var n=parseFloat(String(v).replace(/[^\d.]/g,''));return isNaN(n)?0:n;};
+    if(!promoter||promoter.toLowerCase().indexOf('total')===0||promoter.toLowerCase()==='s.no') continue;
     rows.push({
       region:region, promoter:promoter,
       store:    String(get(['store','store name','outlet'])).trim(),
       zone:     String(get(['zone'])).trim(),
       emp_code: String(get(['emp code','empl code','jwplcode','jwpl code'])).trim(),
       dsr_id:   String(get(['dsr id','dsr','dsrid'])).trim(),
-      c_target: num(get(['canola target','c.target','c target'])),
-      c_sale:   num(get(['canola sale','c.sale','c sale','canola'])),
-      o_target: num(get(['olive target','o.target','o target'])),
-      o_sale:   num(get(['olive sale','o.sale','o sale','olive'])),
+      c_target: numv(get(['canola target','c.target','c target'])),
+      c_sale:   numv(get(['canola sale','c.sale','c sale','canola'])),
+      o_target: numv(get(['olive target','o.target','o target'])),
+      o_sale:   numv(get(['olive sale','o.sale','o sale','olive'])),
       so_name:  String(get(['so name','soname','so'])).trim(),
     });
   }
