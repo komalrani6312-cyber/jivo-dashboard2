@@ -67,15 +67,121 @@ function sheetToRows(ws) {
   const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
   if (!json.length) return [];
 
+  // Detect if this is GT MAY_Final format (region name in col0, then header row, then data)
+  // vs simple format (single header row at top)
+  const isGTFormat = json.slice(0, 5).some(row => {
+    const first = String(row[0] || '').toLowerCase();
+    return (first.includes('gujarat') || first.includes('haryana') ||
+            first.includes('punjab') || first.includes('delhi') ||
+            first.includes('mumbai') || first.includes('sale report'));
+  });
+
+  if (isGTFormat) {
+    return parseGTFormat(json);
+  }
+
+  // Standard format — find single header row
   let hdrIdx = 0;
   for (let i = 0; i < Math.min(10, json.length); i++) {
     const row = json[i].map(c => String(c).toLowerCase());
     if (row.some(c => c.includes('promoter') || c.includes('canola'))) { hdrIdx = i; break; }
   }
+  return parseStandardFormat(json, hdrIdx);
+}
 
+// Parse GT MAY_Final format: region row → header row → data rows → Total → blank → repeat
+function parseGTFormat(json) {
+  const num = v => { const n = parseFloat(String(v).replace(/[^\d.]/g,'')); return isNaN(n) ? 0 : n; };
+  const rows = [];
+  let currentRegion = '';
+  let headers = null;
+  let colMap = {};
+
+  for (let i = 0; i < json.length; i++) {
+    const raw = json[i];
+    const first = String(raw[0] || '').trim();
+    const firstLow = first.toLowerCase();
+
+    // Blank row — reset headers so next region header is picked fresh
+    if (raw.every(c => c === '' || c === null || c === undefined)) {
+      headers = null;
+      continue;
+    }
+
+    // Region header row — col0 has region name, rest empty
+    const nonEmpty = raw.filter(c => c !== '' && c !== null && c !== undefined);
+    if (nonEmpty.length <= 2 && (
+      firstLow.includes('gujarat') || firstLow.includes('haryana') ||
+      firstLow.includes('punjab') || firstLow.includes('delhi') ||
+      firstLow.includes('mumbai') || firstLow.includes('kolkata') ||
+      firstLow.includes('hyderabad') || firstLow.includes('bangalore') ||
+      firstLow.includes('sale report') || firstLow.includes('report')
+    )) {
+      // Extract clean region name
+      currentRegion = first
+        .replace(/sale report/gi, '').replace(/report/gi, '')
+        .trim().replace(/\s+/g, ' ');
+      if (!currentRegion) currentRegion = first.trim();
+      headers = null;
+      continue;
+    }
+
+    // Header row — contains 'promoter' or 'canola'
+    const rowLow = raw.map(c => String(c || '').toLowerCase());
+    if (rowLow.some(c => c.includes('promoter') || c.includes('canola'))) {
+      headers = raw.map(c => String(c || '').trim());
+      // Build column map
+      colMap = {};
+      headers.forEach((h, idx) => {
+        const hl = h.toLowerCase().trim();
+        if (hl.includes('promoter') || hl === 'name') colMap.promoter = idx;
+        else if (hl.includes('store') || hl.includes('outlet')) colMap.store = idx;
+        else if (hl === 'zone' || hl === 'zone ') colMap.zone = idx;
+        else if (hl.includes('emp') || hl.includes('jwpl')) colMap.emp_code = idx;
+        else if (hl === 'dsr id' || hl === 'dsr') colMap.dsr_id = idx;
+        else if (hl === 'canola target' || hl === 'c.target' || hl === 'c target') colMap.c_target = idx;
+        else if (hl === 'canola' || hl === 'canola ' || hl === 'c.sale' || hl === 'c sale') colMap.c_sale = idx;
+        else if (hl === 'olive target' || hl === 'o.target' || hl === 'o target') colMap.o_target = idx;
+        else if (hl === 'olive' || hl === 'olive ' || hl === 'o.sale' || hl === 'o sale') colMap.o_sale = idx;
+        else if (hl.includes('so name') || hl === 'so' || hl === 'soname') colMap.so_name = idx;
+        else if (hl === 'dsr id' || hl.startsWith('dsr')) colMap.dsr_id = idx;
+      });
+      continue;
+    }
+
+    // Total / skip rows
+    if (firstLow.startsWith('total') || firstLow === 's.no' || firstLow === 'sno') continue;
+
+    // Data row — needs headers
+    if (!headers || !currentRegion) continue;
+
+    const g = key => colMap[key] !== undefined ? (raw[colMap[key]] ?? '') : '';
+    const promoter = String(g('promoter')).trim();
+    if (!promoter || promoter === '' || promoter.toLowerCase().startsWith('total')) continue;
+    // Skip if looks like a number-only row (S.No column)
+    if (/^\d+$/.test(promoter)) continue;
+
+    rows.push({
+      region:   currentRegion,
+      promoter: promoter,
+      store:    String(g('store')).trim(),
+      zone:     String(g('zone')).trim(),
+      emp_code: String(g('emp_code')).trim(),
+      dsr_id:   String(g('dsr_id') !== undefined ? raw[colMap['dsr_id']] || '' : '').trim(),
+      c_target: num(g('c_target')),
+      c_sale:   num(g('c_sale')),
+      o_target: num(g('o_target')),
+      o_sale:   num(g('o_sale')),
+      so_name:  String(g('so_name')).trim(),
+    });
+  }
+  return rows;
+}
+
+// Standard format parser
+function parseStandardFormat(json, hdrIdx) {
   const headers = json[hdrIdx].map(c => String(c).trim());
   const num = v => { const n = parseFloat(String(v).replace(/[^\d.]/g,'')); return isNaN(n) ? 0 : n; };
-
   const rows = [];
   let lastRegion = '';
   for (let i = hdrIdx + 1; i < json.length; i++) {
@@ -86,7 +192,7 @@ function sheetToRows(ws) {
     if (!region) continue;
     lastRegion = region;
     const promoter = String(g('promoter')).trim();
-    if (!promoter || promoter.toLowerCase() === 'total') continue;
+    if (!promoter || promoter.toLowerCase().startsWith('total')) continue;
     rows.push({
       region, promoter,
       store:    String(g('store')).trim(),
