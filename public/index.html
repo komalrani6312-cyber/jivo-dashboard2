@@ -133,6 +133,7 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#f4f6f9;color:#1
 .trend-up{background:#dcfce7;color:#166534;}
 .trend-mid{background:#fff3cd;color:#92400e;}
 .trend-dn{background:#fee2e2;color:#991b1b;}
+@keyframes spin{to{transform:rotate(360deg);}}
 @media(max-width:900px){.kpi-strip{grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 12px 0;}}
 @media(max-width:600px){.kpi-strip{grid-template-columns:repeat(2,1fr);}}
 
@@ -259,6 +260,7 @@ td{ position:relative; }
     <span id="data-source-lbl" style="font-size:11px;color:#6b7280;display:flex;align-items:center">
       <span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block;margin-right:5px"></span> Connecting…
     </span>
+    <button class="btn btn-outline" onclick="refreshData()" title="Refresh data from server" style="font-size:16px;padding:7px 12px">↻</button>
     <button class="btn btn-outline" onclick="document.getElementById('file-input').click()">↑ Upload File</button>
     <button class="btn btn-green" onclick="exportExcel()">↓ Export Excel</button>
     <input type="file" id="file-input" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFile(event)">
@@ -278,18 +280,18 @@ td{ position:relative; }
 <div class="kpi-strip">
 
   <!-- 1. Promoters -->
-  <div class="kpi-card" style="--ac:#6366f1">
+  <div class="kpi-card" style="--ac:#6366f1;cursor:pointer" onclick="clearFilters()" title="Click to show all promoters">
     <div class="kpi-icon-txt">👥</div>
     <div class="kpi-lbl">Promoters</div>
     <div class="kpi-val" id="k-p">—</div>
-    <div class="kpi-sub">Active in selected view</div>
+    <div class="kpi-sub">Click to show all</div>
     <div class="kpi-bar" style="margin-top:12px">
       <div class="kpi-bar-fill" id="k-pbar" style="background:linear-gradient(90deg,#6366f1,#818cf8);--glow:rgba(99,102,241,.4);width:100%"></div>
     </div>
   </div>
 
   <!-- 2. Canola Target + Sale -->
-  <div class="kpi-card" style="--ac:#f59e0b">
+  <div class="kpi-card" style="--ac:#f59e0b;cursor:pointer" onclick="filterBySku('canola')" title="Click to filter by Canola performance">
     <div class="kpi-icon-txt">🌻</div>
     <div class="kpi-lbl">Canola Target</div>
     <div class="kpi-val" id="k-ct">—</div>
@@ -300,11 +302,11 @@ td{ position:relative; }
   </div>
 
   <!-- 3. Canola Achievement % — ring -->
-  <div class="kpi-card" style="--ac:#00b96b">
+  <div class="kpi-card" style="--ac:#00b96b;cursor:pointer" onclick="filterByPerf('above100')" title="Click to show achieved promoters">
     <div class="kpi-lbl">Canola Achievement</div>
     <div class="kpi-val" id="k-cp" style="padding-right:54px">—</div>
     <div id="k-cbadge"></div>
-    <div class="kpi-sub">vs Canola Target</div>
+    <div class="kpi-sub">Click: achieved promoters</div>
     <div class="kpi-ring-wrap">
       <svg viewBox="0 0 48 48" width="52" height="52">
         <circle class="kpi-ring-bg" cx="24" cy="24" r="22"/>
@@ -315,7 +317,7 @@ td{ position:relative; }
   </div>
 
   <!-- 4. Olive Target + Sale -->
-  <div class="kpi-card" style="--ac:#10b981">
+  <div class="kpi-card" style="--ac:#10b981;cursor:pointer" onclick="filterBySku('olive')" title="Click to filter by Olive performance">
     <div class="kpi-icon-txt">🫒</div>
     <div class="kpi-lbl">Olive Target</div>
     <div class="kpi-val" id="k-ot">—</div>
@@ -326,11 +328,11 @@ td{ position:relative; }
   </div>
 
   <!-- 5. Olive Achievement % — ring -->
-  <div class="kpi-card" style="--ac:#ec4899">
+  <div class="kpi-card" style="--ac:#ec4899;cursor:pointer" onclick="filterByPerf('below50')" title="Click to show critical promoters">
     <div class="kpi-lbl">Olive Achievement</div>
     <div class="kpi-val" id="k-op" style="padding-right:54px">—</div>
     <div id="k-obadge"></div>
-    <div class="kpi-sub">vs Olive Target</div>
+    <div class="kpi-sub">Click: critical promoters</div>
     <div class="kpi-ring-wrap">
       <svg viewBox="0 0 48 48" width="52" height="52">
         <circle class="kpi-ring-bg" cx="24" cy="24" r="22"/>
@@ -341,7 +343,7 @@ td{ position:relative; }
   </div>
 
   <!-- 6. Combined Sales -->
-  <div class="kpi-card" style="--ac:#8b5cf6">
+  <div class="kpi-card" style="--ac:#8b5cf6;cursor:pointer" onclick="filterByPerf('80to99')" title="Click to show on-track promoters">
     <div class="kpi-icon-txt">📦</div>
     <div class="kpi-lbl">Combined Sales</div>
     <div class="kpi-val" id="k-comb">—</div>
@@ -457,6 +459,47 @@ var DEMO = [
 //  INIT — runs after DOM ready
 // ══════════════════════════════════════
 // ══════════════════════════════════════
+//  KPI CARD CLICK FILTERS + REFRESH
+// ══════════════════════════════════════
+function refreshData() {
+  fetch(BACKEND + '/api/data')
+    .then(function(r){ return r.json(); })
+    .then(function(json){
+      if(json.data && json.data.length) {
+        loadData(json.data);
+        lastUpdatedAt = json.updatedAt;
+        setDataSource('live', json.source || 'Server');
+        toast('✓ Refreshed — ' + json.data.length + ' records', 'success');
+      } else {
+        toast('Server pe koi data nahi — pehle Excel upload karo', 'warn');
+      }
+    })
+    .catch(function(){ toast('Server se connect nahi ho paa raha', 'warn'); });
+}
+
+function filterBySku(sku) {
+  document.getElementById('f-region').value = '';
+  document.getElementById('f-perf').value = '';
+  document.getElementById('f-so').value = '';
+  document.getElementById('f-search').value = '';
+  if(sku === 'canola') {
+    filtered = masterData.filter(function(r){ return r.c_target > 0 || r.c_sale > 0; });
+  } else {
+    filtered = masterData.filter(function(r){ return r.o_target > 0 || r.o_sale > 0; });
+  }
+  document.getElementById('rec-count').textContent = filtered.length + ' records';
+  updateKPIs(); renderRegions();
+  toast('Showing ' + sku.charAt(0).toUpperCase()+sku.slice(1) + ' — ' + filtered.length + ' promoters', 'info');
+}
+
+function filterByPerf(perf) {
+  document.getElementById('f-perf').value = perf;
+  applyFilters();
+  var labels = {above100:'≥100% Achieved', '80to99':'80–99% On Track', below50:'<50% Critical', '50to79':'50–79% Mid'};
+  toast('Filter: ' + (labels[perf]||perf), 'info');
+}
+
+// ══════════════════════════════════════
 //  BACKEND SYNC
 // ══════════════════════════════════════
 var BACKEND = '';  // same origin — works locally and on Railway
@@ -547,9 +590,20 @@ function saveToBackend(rows) {
 //  LOAD DATA
 // ══════════════════════════════════════
 function loadData(rows) {
-  masterData = rows.map(function(r){ return Object.assign({}, r); });
-  var regions = unique(masterData.map(function(r){return r.region;})).sort();
-  var sos     = unique(masterData.map(function(r){return r.so_name;})).filter(Boolean).sort();
+  masterData = rows.map(function(r){
+    var copy = Object.assign({}, r);
+    // Clean nan/undefined strings
+    ['store','zone','emp_code','dsr_id','so_name','region','promoter'].forEach(function(k){
+      if(!copy[k] || copy[k]==='nan' || copy[k]==='undefined') copy[k]='';
+    });
+    // Ensure numbers
+    ['c_target','c_sale','o_target','o_sale'].forEach(function(k){
+      copy[k] = parseFloat(copy[k]) || 0;
+    });
+    return copy;
+  });
+  var regions = unique(masterData.map(function(r){return r.region;})).filter(Boolean).sort();
+  var sos     = unique(masterData.map(function(r){return r.so_name;})).filter(function(s){ return s && s.trim() !== '' && s !== 'nan'; }).sort();
   fillSelect('f-region', regions);
   fillSelect('f-so', sos);
   document.getElementById('pill-regions').textContent   = regions.length + ' Regions';
